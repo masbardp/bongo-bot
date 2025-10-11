@@ -5,14 +5,17 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes
 )
 
-BOT_TOKEN = os.getenv("7348969880:AAGOKFWM7crS4R2fzNmx54AcOMZq1WKZtoI")
+# ✅ Load token from Render environment variable
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.environ.get("PORT", 8443))
+
+if not BOT_TOKEN:
+    raise SystemExit("❌ BOT_TOKEN missing! Please set it in Render Environment Variables.")
 
 # store user choices temporarily
 user_links = {}
 
 # ---------- yt-dlp helpers ----------
-
 def get_formats(url):
     """Return available resolutions using yt-dlp."""
     cmd = ["yt-dlp", "-F", url, "--dump-json"]
@@ -40,7 +43,6 @@ def download_video(url, fmt, output_path):
     subprocess.run(cmd)
 
 # ---------- Telegram handlers ----------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Send me a Bongo video link to begin.")
 
@@ -90,14 +92,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Download failed.")
 
 # ---------- Run bot ----------
-
 def main():
+    print("🔍 Starting Bongo Bot with token:", BOT_TOKEN[:10] + "…")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(CallbackQueryHandler(button))
 
-    # For Render webhook
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -107,3 +108,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
