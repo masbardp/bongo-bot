@@ -1,2 +1,6 @@
-python-telegram-bot==21.6
+python-telegram-bot==20.7
 yt-dlp==2025.9.26
+requests
+selenium
+webdriver-manager
+httpx==0.25.2
