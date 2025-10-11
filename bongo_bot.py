@@ -1,195 +1,160 @@
-# bongo_bot.py
 import os
+import re
 import time
+import subprocess
 import tempfile
-import shutil
+import requests
 import logging
-import yt_dlp
-from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    ContextTypes,
     CallbackQueryHandler,
     filters,
-    ContextTypes,
 )
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------- Config ----------
+
+# ===================== CONFIG ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise SystemExit("❌ BOT_TOKEN missing! Set it in Render environment variables.")
+    raise SystemExit("❌ BOT_TOKEN missing! Add it in Render Environment Variables.")
+# ===================================================
 
-# max file size to send (bytes) — Telegram bots commonly limited (50-200MB depending)
-MAX_UPLOAD_BYTES = 190 * 1024 * 1024  # 190 MB to be safe
-
-# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bongo-bot")
 
-# ---------- Helpers using yt-dlp ----------
-def list_formats(url):
-    """
-    Return a list of (label, format_id, filesize) sorted by resolution desc.
-    filesize may be None.
-    """
-    ydl_opts = {"quiet": True, "skip_download": True, "no_warnings": True}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as e:
-        log.exception("yt-dlp extract_info failed")
-        return []
+# ===================================================
+# Core scraping logic (your working version)
+# ===================================================
 
-    formats = []
-    for f in info.get("formats", []):
-        # skip audio-only formats
-        if f.get("vcodec") == "none":
-            continue
-        height = f.get("height") or 0
-        fmt_id = f.get("format_id")
-        # size estimate: use filesize if available
-        filesize = f.get("filesize") or f.get("filesize_approx")
-        label = f"{height}p" if height else (f.get("format_note") or f.get("ext"))
-        formats.append((label, fmt_id, filesize, height))
+def get_master_m3u8(bongo_url):
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--log-level=3")
 
-    # remove duplicates by label keeping highest height
-    seen = {}
-    for label, fid, sz, h in formats:
-        if label not in seen or h > seen[label][3]:
-            seen[label] = (label, fid, sz, h)
-    uniq = list(seen.values())
-    # sort by height desc (so highest resolution first)
-    uniq.sort(key=lambda x: x[3] or 0, reverse=True)
-    return uniq
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    driver.get(bongo_url)
+    time.sleep(5)
+    html = driver.page_source
+    driver.quit()
 
-def download_with_ytdlp(url, format_id, out_path):
-    """
-    Download using yt-dlp into out_path (filename).
-    Returns True on success.
-    """
-    ydl_opts = {
-        "format": format_id,
-        "outtmpl": out_path,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "retries": 10,
-        "continuedl": True,
-        "concurrent_fragment_downloads": 16,  # speed up HLS/dash fragments
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        return True
-    except Exception:
-        log.exception("yt-dlp download failed")
+    match = re.search(r'https://[^\'" ]+\.m3u8', html)
+    return match.group(0) if match else None
+
+
+def choose_resolution(master_url, resolution):
+    r = requests.get(master_url, headers={"Referer": "https://bongobd.com/"})
+    lines = r.text.splitlines()
+    for line in lines:
+        if resolution in line and line.endswith(".m3u8"):
+            if not line.startswith("http"):
+                base = "/".join(master_url.split("/")[:-1])
+                return base + "/" + line
+            return line
+    return None
+
+
+def download_video(bongo_url, output_path, resolution):
+    log.info("🔍 Loading Bongo page and finding master playlist...")
+    master_m3u8 = get_master_m3u8(bongo_url)
+    if not master_m3u8:
+        log.error("❌ Could not find master playlist.")
         return False
 
-# ---------- Bot handlers ----------
-user_state = {}  # user_id -> {"url":..., "formats":[...]}
+    log.info(f"✅ Master playlist found: {master_m3u8}")
+    chosen_m3u8 = choose_resolution(master_m3u8, resolution)
+    if not chosen_m3u8:
+        log.error(f"❌ Could not find a stream with resolution {resolution}.")
+        return False
+
+    log.info(f"🎬 Downloading {resolution} stream: {chosen_m3u8}")
+    cmd = [
+        "ffmpeg",
+        "-headers", "Referer: https://bongobd.com/",
+        "-i", chosen_m3u8,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        "-threads", "0",
+        output_path,
+    ]
+    subprocess.run(cmd)
+    return os.path.exists(output_path)
+
+
+# ===================================================
+# Telegram Bot Handlers
+# ===================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Send me a Bongo (or other) video URL and I'll list qualities for you.")
+    await update.message.reply_text("👋 Send me a BongoBD link and I’ll fetch available resolutions!")
+
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = (update.message.text or "").strip()
-    if not url or not url.startswith("http"):
-        await update.message.reply_text("⚠️ Please send a valid video link (starting with http...).")
+    url = update.message.text.strip()
+    if "bongobd.com/watch" not in url:
+        await update.message.reply_text("❌ Please send a valid BongoBD video link.")
         return
 
-    log.info("User %s requested url: %s", update.effective_user.id, url)
-    msg = await update.message.reply_text("🔍 Fetching available resolutions, please wait...")
+    await update.message.reply_text("🔍 Fetching available resolutions… please wait ⏳")
 
-    formats = list_formats(url)
-    if not formats:
-        await msg.edit_text("❌ No playable video formats found or link invalid.")
+    master = get_master_m3u8(url)
+    if not master:
+        await update.message.reply_text("❌ Could not detect a video link or master playlist.")
         return
 
-    # Save user state
-    user_state[update.effective_user.id] = {"url": url, "formats": formats}
+    # Find all resolutions in master.m3u8
+    r = requests.get(master, headers={"Referer": "https://bongobd.com/"})
+    lines = r.text.splitlines()
+    resolutions = [l.split("x")[-1].replace(",", "") + "p" for l in lines if "RESOLUTION=" in l]
+    resolutions = list(set(resolutions)) or ["360p", "480p", "720p"]
 
-    # Build keyboard with top 6 formats
-    buttons = []
-    for label, fid, sz, h in formats[:8]:
-        display = label
-        if sz:
-            display += f" ({round(sz/1024/1024,1)}MB)"
-        buttons.append([InlineKeyboardButton(display, callback_data=fid)])
+    keyboard = [
+        [InlineKeyboardButton(res, callback_data=f"{url}|{res}")] for res in resolutions
+    ]
+    await update.message.reply_text(
+        "🎞 Choose resolution:", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-    reply_markup = InlineKeyboardMarkup(buttons)
-    await msg.edit_text("🎚 Choose a resolution to download:", reply_markup=reply_markup)
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def resolution_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
 
-    state = user_state.get(user_id)
-    if not state:
-        await query.edit_message_text("⚠️ Please send a video link first.")
-        return
+    data = query.data.split("|")
+    url, res = data[0], data[1]
+    await query.edit_message_text(f"🎬 Downloading {res}… Please wait.")
 
-    fid = query.data
-    url = state["url"]
-    label = next((lbl for lbl, f, s, h in state["formats"] if f == fid), fid)
-    await query.edit_message_text(f"⬇️ Downloading {label} — this may take a while...")
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        success = download_video(url, tmp.name, res)
+        if not success:
+            await query.edit_message_text("❌ Failed to download the video.")
+            return
 
-    # prepare temp file
-    tmpdir = tempfile.mkdtemp(prefix="bongobot_")
-    out_file = os.path.join(tmpdir, "video.%(ext)s")  # yt-dlp will replace ext
-    log.info("Downloading %s format %s to %s", url, fid, out_file)
+        await query.edit_message_text("✅ Uploading to Telegram…")
+        await query.message.reply_video(video=open(tmp.name, "rb"), caption=f"{res} Video")
+        os.remove(tmp.name)
 
-    ok = download_with_ytdlp(url, fid, out_file)
-    # find downloaded file
-    downloaded = None
-    if ok:
-        # find a file in tmpdir
-        files = list(Path(tmpdir).iterdir())
-        if files:
-            downloaded = str(files[0])
-            log.info("Downloaded file path: %s", downloaded)
 
-    if not downloaded or not os.path.exists(downloaded):
-        await query.message.reply_text("❌ Download failed.")
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        return
+# ===================================================
+# Bot Start
+# ===================================================
 
-    size = os.path.getsize(downloaded)
-    log.info("Downloaded size: %d bytes", size)
-    if size > MAX_UPLOAD_BYTES:
-        await query.message.reply_text(
-            f"⚠️ Downloaded file is too large to send via Telegram ({round(size/1024/1024,1)} MB)."
-        )
-        # optionally: upload to external host / provide link — skipped here
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        return
-
-    # send video (as document if large or to preserve quality)
-    try:
-        with open(downloaded, "rb") as f:
-            await query.message.reply_video(video=f)
-        await query.message.reply_text("✅ Done — enjoy!")
-    except Exception:
-        log.exception("Failed to send file")
-        await query.message.reply_text("❌ Failed to send the video.")
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot is running.")
-
-# ---------- Run ----------
 def main():
-    log.info("Starting Bongo Bot")
+    log.info("🚀 Starting Bongo Bot polling...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app.add_handler(CallbackQueryHandler(button))
-    # Polling mode (Render recommended)
-    app.run_polling(drop_pending_updates=True)
+    app.add_handler(CallbackQueryHandler(resolution_callback))
+    app.run_polling()
+
 
 if __name__ == "__main__":
     main()
