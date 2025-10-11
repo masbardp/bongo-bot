@@ -2,6 +2,7 @@ services:
   - type: web
     name: bongo-bot
     env: python
-    plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python bongo_bot.py"
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
+      pip install -r requirements.txt
+    startCommand: python bongo_bot.py
