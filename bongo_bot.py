@@ -1,16 +1,13 @@
-import os, time, subprocess, json, shutil
+import os, time, subprocess, json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
 )
 
-# ✅ Load token from Render environment variable
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 8443))
-
 if not BOT_TOKEN:
-    raise SystemExit("❌ BOT_TOKEN missing! Please set it in Render Environment Variables.")
+    raise SystemExit("❌ BOT_TOKEN missing! Set it in Render environment variables.")
 
 # store user choices temporarily
 user_links = {}
@@ -93,19 +90,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Run bot ----------
 def main():
-    print("🔍 Starting Bongo Bot with token:", BOT_TOKEN[:10] + "…")
+    print("🚀 Starting Bongo Bot polling...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(CallbackQueryHandler(button))
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=BOT_TOKEN,
-        webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_URL')}/{BOT_TOKEN}"
-    )
+    # ✅ Polling mode is safer on Render free plan
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
