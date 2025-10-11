@@ -1,102 +1,17 @@
-import os, time, subprocess, json
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes
-)
+from telegram import Update
+from telegram.ext import CommandHandler, MessageHandler, filters, ApplicationBuilder, ContextTypes
+from bongo_downloader import download_video  # import the above file
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise SystemExit("❌ BOT_TOKEN missing! Set it in Render environment variables.")
-
-user_links = {}
-
-# ---------- yt-dlp helpers ----------
-def get_formats(url):
-    """Return available resolutions using yt-dlp."""
-    cmd = ["yt-dlp", "-F", url, "--dump-json"]
-    try:
-        result = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
-        data = json.loads(result)
-        formats = []
-        for f in data.get("formats", []):
-            if f.get("vcodec") != "none" and f.get("height"):
-                label = f"{f['height']}p"
-                formats.append((label, f["format_id"]))
-        unique = list({r[0]: r for r in formats}.values())
-        return sorted(unique, key=lambda x: int(x[0][:-1]), reverse=True)
-    except Exception:
-        return []
-
-def download_video(url, fmt, output_path):
-    """Download chosen format."""
-    cmd = [
-        "yt-dlp", "-f", fmt,
-        "-N", "16",
-        "-o", output_path,
-        url
-    ]
-    subprocess.run(cmd)
-
-# ---------- Telegram handlers ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Send me a Bongo video link to begin.")
-
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_bongo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-    if not url.startswith("http"):
-        await update.message.reply_text("⚠️ Please send a valid link.")
+    if "bongobd.com" not in url:
+        await update.message.reply_text("⚠️ Please send a valid BongoBD video link.")
         return
 
     await update.message.reply_text("🔍 Fetching available resolutions…")
-    formats = get_formats(url)
-    if not formats:
-        await update.message.reply_text("❌ No resolutions found or link invalid.")
-        return
+    success = download_video(url, "bongo_video.mp4", "720")
 
-    user_links[update.effective_user.id] = (url, formats)
-
-    keyboard = [
-        [InlineKeyboardButton(res[0], callback_data=res[1])] for res in formats
-    ]
-    await update.message.reply_text(
-        "🎚️ Choose a resolution:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    fmt = query.data
-    user_id = query.from_user.id
-    if user_id not in user_links:
-        await query.edit_message_text("⚠️ Send a video link first.")
-        return
-
-    url, formats = user_links[user_id]
-    label = next((r[0] for r in formats if r[1] == fmt), fmt)
-    output_file = f"bongo_{int(time.time())}.mp4"
-
-    await query.edit_message_text(f"⬇️ Downloading {label}… please wait.")
-    download_video(url, fmt, output_file)
-
-    if os.path.exists(output_file):
-        await query.message.reply_video(video=open(output_file, "rb"))
-        os.remove(output_file)
+    if success:
+        await update.message.reply_video(open("bongo_video.mp4", "rb"))
     else:
-        await query.message.reply_text("❌ Download failed.")
-
-# ---------- Run bot ----------
-def main():
-    print("🚀 Starting Bongo Bot polling...")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app.add_handler(CallbackQueryHandler(button))
-
-    app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+        await update.message.reply_text("❌ Could not process this link.")
