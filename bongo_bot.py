@@ -9,7 +9,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("❌ BOT_TOKEN missing! Set it in Render environment variables.")
 
-# store user choices temporarily
 user_links = {}
 
 # ---------- yt-dlp helpers ----------
@@ -97,7 +96,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(CallbackQueryHandler(button))
 
-    # ✅ Polling mode is safer on Render free plan
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
