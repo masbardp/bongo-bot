@@ -2,52 +2,46 @@ import os
 import re
 import time
 import subprocess
-import tempfile
-import requests
 import logging
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    CallbackQueryHandler,
-    filters,
-)
+import requests
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
 
+# ---------------- CONFIG ----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 
-# ===================== CONFIG ======================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise SystemExit("❌ BOT_TOKEN missing! Add it in Render Environment Variables.")
-# ===================================================
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("bongo-bot")
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("bongo-bot")
-
-# ===================================================
-# Core scraping logic (your working version)
-# ===================================================
-
+# ---------------- BONGO FUNCTIONS ----------------
 def get_master_m3u8(bongo_url):
     chrome_options = Options()
+    chrome_options.binary_location = os.getenv("CHROME_BIN", "/usr/bin/chromium")
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--log-level=3")
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    driver = webdriver.Chrome(
+        service=Service(os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")),
+        options=chrome_options
+    )
+
     driver.get(bongo_url)
-    time.sleep(5)
+    time.sleep(6)
+
     html = driver.page_source
     driver.quit()
 
     match = re.search(r'https://[^\'" ]+\.m3u8', html)
-    return match.group(0) if match else None
+    if match:
+        return match.group(0)
+    return None
 
 
 def choose_resolution(master_url, resolution):
@@ -63,19 +57,16 @@ def choose_resolution(master_url, resolution):
 
 
 def download_video(bongo_url, output_path, resolution):
-    log.info("🔍 Loading Bongo page and finding master playlist...")
     master_m3u8 = get_master_m3u8(bongo_url)
     if not master_m3u8:
-        log.error("❌ Could not find master playlist.")
-        return False
+        logger.error("Could not find master playlist.")
+        return None
 
-    log.info(f"✅ Master playlist found: {master_m3u8}")
     chosen_m3u8 = choose_resolution(master_m3u8, resolution)
     if not chosen_m3u8:
-        log.error(f"❌ Could not find a stream with resolution {resolution}.")
-        return False
+        logger.error(f"Could not find a stream with resolution {resolution}.")
+        return None
 
-    log.info(f"🎬 Downloading {resolution} stream: {chosen_m3u8}")
     cmd = [
         "ffmpeg",
         "-headers", "Referer: https://bongobd.com/",
@@ -83,76 +74,51 @@ def download_video(bongo_url, output_path, resolution):
         "-c", "copy",
         "-bsf:a", "aac_adtstoasc",
         "-threads", "0",
-        output_path,
+        output_path
     ]
     subprocess.run(cmd)
-    return os.path.exists(output_path)
+    return output_path if os.path.exists(output_path) else None
 
 
-# ===================================================
-# Telegram Bot Handlers
-# ===================================================
-
+# ---------------- TELEGRAM HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Send me a BongoBD link and I’ll fetch available resolutions!")
+    await update.message.reply_text("🎬 Send me a Bongo video link, and I’ll fetch it for you!")
 
 
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_bongo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-    if "bongobd.com/watch" not in url:
-        await update.message.reply_text("❌ Please send a valid BongoBD video link.")
+    logger.info(f"User {update.effective_user.id} sent: {url}")
+
+    if "bongobd.com/watch/" not in url:
+        await update.message.reply_text("❌ Please send a valid Bongo video URL.")
         return
 
-    await update.message.reply_text("🔍 Fetching available resolutions… please wait ⏳")
+    await update.message.reply_text("🔍 Fetching available stream... please wait ⏳")
 
-    master = get_master_m3u8(url)
-    if not master:
-        await update.message.reply_text("❌ Could not detect a video link or master playlist.")
+    output_file = f"video_{int(time.time())}.mp4"
+    resolution = "480"  # You can change this to 720, 1080, etc.
+
+    video_path = download_video(url, output_file, resolution)
+
+    if not video_path:
+        await update.message.reply_text("❌ Could not extract video link. Try another URL or resolution.")
         return
 
-    # Find all resolutions in master.m3u8
-    r = requests.get(master, headers={"Referer": "https://bongobd.com/"})
-    lines = r.text.splitlines()
-    resolutions = [l.split("x")[-1].replace(",", "") + "p" for l in lines if "RESOLUTION=" in l]
-    resolutions = list(set(resolutions)) or ["360p", "480p", "720p"]
+    await update.message.reply_text("✅ Download complete! Uploading video...")
 
-    keyboard = [
-        [InlineKeyboardButton(res, callback_data=f"{url}|{res}")] for res in resolutions
-    ]
-    await update.message.reply_text(
-        "🎞 Choose resolution:", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    with open(video_path, "rb") as video:
+        await update.message.reply_video(video, caption="🎥 Here’s your Bongo video!")
+
+    os.remove(video_path)
+    logger.info(f"Sent video {video_path} to user {update.effective_user.id}")
 
 
-async def resolution_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data.split("|")
-    url, res = data[0], data[1]
-    await query.edit_message_text(f"🎬 Downloading {res}… Please wait.")
-
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-        success = download_video(url, tmp.name, res)
-        if not success:
-            await query.edit_message_text("❌ Failed to download the video.")
-            return
-
-        await query.edit_message_text("✅ Uploading to Telegram…")
-        await query.message.reply_video(video=open(tmp.name, "rb"), caption=f"{res} Video")
-        os.remove(tmp.name)
-
-
-# ===================================================
-# Bot Start
-# ===================================================
-
+# ---------------- MAIN ----------------
 def main():
-    log.info("🚀 Starting Bongo Bot polling...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app.add_handler(CallbackQueryHandler(resolution_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bongo))
+    logger.info("Starting Bongo Bot polling...")
     app.run_polling()
 
 
